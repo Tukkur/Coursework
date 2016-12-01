@@ -1,0 +1,112 @@
+Students:
+1. <Student 1 Full Name> (<Student 1 x500>)
+2. <Student 2 Full Name> (<Student 2 x500>)
+
+Brief Summary:
+We added a timestamp attribute to the buffer struct. This allowed us to check the timestamp in freelist.c in our LIFO algorithm where we find the buffer with the maximum timestamp and choose to replace that one.
+
+Detailed Changes:
+1. <Freelist.c>: postgresql-9.2.1/src/backend/storage/buffer
+	Line 245 - 312:
+	while (StrategyControl->firstFreeBuffer >= 0)
+	{
+		buf = &BufferDescriptors[StrategyControl->firstFreeBuffer];
+		Assert(buf->freeNext != FREENEXT_NOT_IN_LIST);
+
+		/* Unconditionally remove buffer from freelist */
+		StrategyControl->firstFreeBuffer = buf->freeNext;
+		buf->freeNext = FREENEXT_NOT_IN_LIST;
+
+		/*
+		 * If the buffer is pinned or has a nonzero usage_count, we cannot use
+		 * it; discard it and retry.  (This can only happen if VACUUM put a
+		 * valid buffer in the freelist and then someone else used it before
+		 * we got to it.  It's probably impossible altogether as of 8.3, but
+		 * we'd better check anyway.)
+		 */
+		LockBufHdr(buf);
+
+		if (buf->refcount == 0)
+		{
+			if (strategy != NULL)
+				AddBufferToRing(strategy, buf);
+			return buf;
+		}
+		UnlockBufHdr(buf);
+
+
+	}
+
+	/* Nothing on the freelist, so run the LIFO algorithm */
+	volatile BufferDesc *buffer_maximum = NULL;
+	int temporary_maximum = -1;
+
+	printf("\nCandidate buffers timestamps: ");
+	int i;	
+	for(i = 0; i < NBuffers; i++)
+	{
+		buf = &BufferDescriptors[i];
+		LockBufHdr(buf);
+
+		if(buf->timestamp > temporary_maximum)
+		{
+			if (buf->refcount == 0)
+			{
+			printf("%i, ", buf->timestamp);
+			if(buffer_maximum != NULL)
+				UnlockBufHdr(buffer_maximum);
+			buffer_maximum = buf;
+			temporary_maximum = buffer_maximum->timestamp;
+			}
+		}
+		else
+		{
+			UnlockBufHdr(buf);
+		}
+	}
+
+	if(temporary_maximum == -1)
+	{
+		elog(ERROR, "\nno unpinned buffers available\n");
+	}
+
+	printf("\nReplaced buffer: %i \n", buffer_maximum->timestamp);
+
+	if (strategy != NULL)
+		AddBufferToRing(strategy, buffer_maximum);
+
+	return buffer_maximum;
+	}
+}
+	- All of the code above was not changed only some parts were modified.
+	- Line 264: we took out the check for usuage count since we are not using the clock algorithm anymore.
+	- Line 275 && 292: we added a buffer_maximum pointer that points to null orginally. Then is changed to the next maximum buffer object. Until it is set to the true maximum buffer object.
+	- Line 276: temporary_maximum is used to keep track of the maximum found timestamp during the iteration.
+	- Line 280 - 300: The for loop is used to iterate through all of the buffers to find the maximum. Inside this for loop candidate buffers, ones with a refcount of 0 and a timestamp greater than the temporary_max, these candidate's timestamps are printed out. For each candidate buffer we set the buffer_maximum to the newest candidate and temporary maximum to the buffer_maximum's timestamp.
+	- Line 312: we return the buffer_maximum object which we selected to be replaced
+	
+2. <buf_internals.h>: postgresql-9.2.1/src/include/storage
+	Line 142:
+	int timestamp;
+	- added a timestamp attribute to the buffer object-
+
+3. <buf_init.c> postgresql-9.2.1/src/backend/storage/buffer
+	Line 107:	
+	buf->timestamp = 0;
+	- initialized the buffer's timestamp attribute to 0
+
+4. <bufmgr.c> postgresql-9.2.1/src/backend/storage/buffer
+	Line 831 - 841:
+	int timestamp_maximum = 0;
+	int i;
+	for(i = 0; i < NBuffers; i++)
+	{
+		if((&BufferDescriptors[i])->timestamp > timestamp_maximum)
+		{
+			timestamp_maximum = (&BufferDescriptors[i])->timestamp;
+		}
+	}
+	timestamp_maximum++;
+	buf->timestamp = timestamp_maximum;
+
+We iterate through the number of buffers to set the timestamp_maximum to the maximum timestamp in the buffers. We do this by finding the greatest value and updating timestamp_maximum as we find a greater value. 

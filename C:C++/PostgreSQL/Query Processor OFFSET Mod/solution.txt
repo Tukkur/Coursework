@@ -1,0 +1,88 @@
+Students:
+1. <Tukkur VanVark> (<vanv0123>)
+2. <Yash Patel> (<patel248>)
+
+Brief summary of changes:
+Changed the behavior of the ExecLimit function to add a skipping loop to LIMIT_INWINDOW in order to achieve desired result.
+Both skipping loops needed to be modified so that it would compare 'node->offset' with 'node->posInOffset' rather than with 'node->position'.
+This way we could reset the 'node->posInOffset' variable without worrying about affected other aspects of the query like LIMIT.
+
+By adding attribute node->numOfOffsets to the LimitState Struct in execnodes.h, we can easily keep track of how many skips we are doing which is necessary in order for our changes to follow the LIMIT operators functionality.
+
+Detailed Changes:
+File #1: NodeLimit.c
+Path:/src/NodeLimit.c
+
+Change #1: lines 98-102
+if (node->position == 0){
+	node->posInOffset = node->offset;
+	printf("HIT node->position == 0\n");
+}
+This check (line 98) is here to handle the base case of the first element which needs to be printed before skipping. So it sets the 'node->posInOffset' to
+the 'node->offset' (line 99) for the first element. This assignment makes the skipping loop not skip tuples before going to LIMIT_INWINDOW.
+
+
+Change #2: lines 125-131 and lines 197-202
+++node->position;
+if (++node->posInOffset > node->offset){
+	printf("Number of offsets: %i\n", node->numOfOffsets);
+	node->numOfOffsets++;
+	node->posInOffset = 0;
+	break;
+}
+The check on line 126 was originally using 'node->position' but in order to repeat the offset we are using 'node->posInOffset'.
+The 'node->posInOffset' starts at zero increases to the value of 'node->offset' within LIMIT_RESCAN then on line 129 gets resetto zero. 
+This cylce continues until the limit, if provided, or the end of the table is reached. This is the
+same functionality as in LIMIT_INWINDOW loop.
+
+Even though we are not using 'node->position' to compare to 'node->offset' we still need to increment it (line 125) since we are still
+using 'node->position' in the LIMIT_INWINDOW case to return the correct tuple.
+
+Line 128 increments the 'node->numOfOffsets' because we know at this point we just skipped another number of tuples equivalent to the offset.
+This is also hit when 'node->position' = 0 because of Change #1 which is why the 'node->numOfOffset' starts at -1.
+
+
+Change #3: lines 163-172
+if (!node->noCount &&
+	node->position - (node->numOfOffsets* node->offset) >= node->count)
+{
+	printf("Number of offsets 22: %i\n", node->numOfOffsets);
+	printf("Left side of eq: %i\n", node->position - (node->numOfOffsets * node->offset));
+	printf("Rightside of eq: %i\n", node->count);
+	printf("setting lstate to LIMIT_WINDOWEND\n");
+	node->lstate = LIMIT_WINDOWEND;
+	return NULL;
+}
+This is the checks if the number of outputted tuples is greater than or equal to the LIMIT count so that it will stop executing the query.
+The way we changed the offset operator forces us to make a change here. Line 164 is necessary in order to correctly calculate the number of
+outputted tuples. Line 164 uses the 'node->posInOffset* node->offset' to calculate the number of skipped tuples.
+So 'node->position' - number of skipped tuples gives us the number of outputted tuples.
+
+Change #4: lines 177-178
+node->posInOffset = 0;
+node->lstate = LIMIT_RESCAN;
+Line 177 is just to make sure the 'node->posInOffset' is zero. It should always be zero at this point but in case its not we set to zero here.
+
+Line 178 sets the state to LIMIT_RESCAN since after outputting one tuple we want to skip the offset number of tuples again. Without this line
+our code would keep going back into LIMIT_INWINDOW rather than alternating between LIMIT_INWINDOW and LIMIT_RESCAN.
+
+Change #5: lines 340-341
+node->posInOffset = 0;
+node->numOfOffsets = -1; // start at -1 b/c first tuple printed increments to zero right away
+Since we added these two attributes to the node they need to be initialized here since this is where all the other node
+attributes are set.
+
+'node->posInOffset' is set to zero since original no tuples have been skipped.
+'node->numOfOffsets' is set to -1 since it counts the number of times an offsets many of tuples have been skipped.
+But the first time it is incremented is after the first tuple is printed which doesn't skip any tuples before it.
+
+
+
+File #2: execnodes.h
+Path: /src/include/execnodes.h
+
+Change: lines 1875-1876
+int64 posInOffset; /* keeps getting reset to zero once hits offset*/
+int64 numOfOffsets; /* keeps track of number of times skipped */
+This is where the LimitState struct is defined so we have to add these two attributes here so that each time a LimitState struct is
+declared these attributes can be set.
